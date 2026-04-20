@@ -1,0 +1,19 @@
+services:
+  - type: worker
+    name: makbot
+    runtime: node
+    plan: starter
+    autoDeploy: true
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: DISCORD_TOKEN
+        sync: false
+      - key: GUILD_ID
+        sync: false
+      - key: VOICE_CHANNEL_ID
+        sync: false
+      - key: RECONNECT_DELAY_MS
+        value: "15000"
+      - key: HEALTHCHECK_INTERVAL_MS
+        value: "60000"
