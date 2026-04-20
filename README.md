@@ -21,6 +21,7 @@ Copy `.env.example` to `.env` and fill values:
 - `VOICE_CHANNEL_ID`
 - `RECONNECT_DELAY_MS` (optional)
 - `HEALTHCHECK_INTERVAL_MS` (optional)
+- `LOGIN_RETRY_DELAY_MS` (optional)
 
 ## 3) Run Locally
 
@@ -61,6 +62,7 @@ Use a Background Worker (not a Web Service), so it stays running.
   - `VOICE_CHANNEL_ID`
   - `RECONNECT_DELAY_MS` (optional, e.g. `15000`)
   - `HEALTHCHECK_INTERVAL_MS` (optional, e.g. `60000`)
+  - `LOGIN_RETRY_DELAY_MS` (optional, e.g. `20000`)
 6. Deploy.
 
 ### Option B: Blueprint (render.yaml)

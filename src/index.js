@@ -17,6 +17,7 @@ const guildId = process.env.GUILD_ID;
 const voiceChannelId = process.env.VOICE_CHANNEL_ID;
 const reconnectDelayMs = Number(process.env.RECONNECT_DELAY_MS || 15000);
 const healthcheckIntervalMs = Number(process.env.HEALTHCHECK_INTERVAL_MS || 60000);
+const loginRetryDelayMs = Number(process.env.LOGIN_RETRY_DELAY_MS || 20000);
 
 if (!token || !guildId || !voiceChannelId) {
   console.error("Missing required environment variables.");
@@ -31,6 +32,13 @@ const client = new Client({
 let reconnectTimer = null;
 let healthcheckTimer = null;
 let connectInProgress = false;
+let loginInProgress = false;
+
+function delay(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
 
 function log(message) {
   console.log(`[${new Date().toISOString()}] ${message}`);
@@ -49,6 +57,10 @@ function scheduleReconnect(reason) {
 }
 
 async function ensureVoiceConnection(reason = "healthcheck") {
+  if (!client.isReady()) {
+    return;
+  }
+
   if (connectInProgress) {
     return;
   }
@@ -119,6 +131,60 @@ async function ensureVoiceConnection(reason = "healthcheck") {
   }
 }
 
+async function startLoginLoop() {
+  if (loginInProgress) {
+    return;
+  }
+
+  loginInProgress = true;
+  while (!client.isReady()) {
+    try {
+      log("Attempting Discord login...");
+      await client.login(token);
+      log("Discord login succeeded.");
+      break;
+    } catch (error) {
+      log(`Login failed: ${error.message}`);
+      log(`Retrying login in ${loginRetryDelayMs}ms.`);
+      await delay(loginRetryDelayMs);
+    }
+  }
+  loginInProgress = false;
+}
+
+function clearTimers() {
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+
+  if (healthcheckTimer) {
+    clearInterval(healthcheckTimer);
+    healthcheckTimer = null;
+  }
+}
+
+async function shutdown(code = 0) {
+  clearTimers();
+
+  try {
+    const connection = getVoiceConnection(guildId);
+    if (connection) {
+      connection.destroy();
+    }
+  } catch (error) {
+    log(`Shutdown connection cleanup error: ${error.message}`);
+  }
+
+  try {
+    await client.destroy();
+  } catch (error) {
+    log(`Shutdown client cleanup error: ${error.message}`);
+  }
+
+  process.exit(code);
+}
+
 client.once("ready", async () => {
   log(`Logged in as ${client.user.tag}`);
 
@@ -145,11 +211,38 @@ client.on("error", (error) => {
   log(`Client error: ${error.message}`);
 });
 
+client.on("shardError", (error) => {
+  log(`Shard error: ${error.message}`);
+  scheduleReconnect("shard-error");
+});
+
 client.on("shardDisconnect", () => {
   scheduleReconnect("gateway-disconnect");
 });
 
-client.login(token).catch((error) => {
-  log(`Login failed: ${error.message}`);
+client.on("invalidated", () => {
+  log("Session invalidated. Exiting so the host can restart the worker.");
   process.exit(1);
 });
+
+process.on("unhandledRejection", (reason) => {
+  const message = reason instanceof Error ? reason.stack || reason.message : String(reason);
+  log(`Unhandled rejection: ${message}`);
+});
+
+process.on("uncaughtException", (error) => {
+  log(`Uncaught exception: ${error.stack || error.message}`);
+  process.exit(1);
+});
+
+process.on("SIGTERM", async () => {
+  log("Received SIGTERM, shutting down.");
+  await shutdown(0);
+});
+
+process.on("SIGINT", async () => {
+  log("Received SIGINT, shutting down.");
+  await shutdown(0);
+});
+
+startLoginLoop();

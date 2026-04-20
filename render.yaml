@@ -17,3 +17,5 @@ services:
         value: "15000"
       - key: HEALTHCHECK_INTERVAL_MS
         value: "60000"
+      - key: LOGIN_RETRY_DELAY_MS
+        value: "20000"
