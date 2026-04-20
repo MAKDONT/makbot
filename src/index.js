@@ -15,13 +15,47 @@ const {
 const token = process.env.DISCORD_TOKEN;
 const guildId = process.env.GUILD_ID;
 const voiceChannelId = process.env.VOICE_CHANNEL_ID;
+const voiceTargetsRaw = process.env.VOICE_TARGETS;
 const reconnectDelayMs = Number(process.env.RECONNECT_DELAY_MS || 15000);
 const healthcheckIntervalMs = Number(process.env.HEALTHCHECK_INTERVAL_MS || 60000);
 const loginRetryDelayMs = Number(process.env.LOGIN_RETRY_DELAY_MS || 20000);
 
-if (!token || !guildId || !voiceChannelId) {
+function parseVoiceTargets(rawTargets) {
+  if (!rawTargets || !rawTargets.trim()) {
+    return [];
+  }
+
+  return rawTargets
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .map((entry) => {
+      const [parsedGuildId, parsedVoiceChannelId] = entry.split(":").map((part) => part.trim());
+      if (!parsedGuildId || !parsedVoiceChannelId) {
+        throw new Error(`Invalid VOICE_TARGETS entry: ${entry}. Expected guildId:voiceChannelId`);
+      }
+      return {
+        guildId: parsedGuildId,
+        voiceChannelId: parsedVoiceChannelId,
+      };
+    });
+}
+
+let voiceTargets = [];
+try {
+  voiceTargets = parseVoiceTargets(voiceTargetsRaw);
+} catch (error) {
+  console.error(error.message);
+  process.exit(1);
+}
+
+if (voiceTargets.length === 0 && guildId && voiceChannelId) {
+  voiceTargets = [{ guildId, voiceChannelId }];
+}
+
+if (!token || voiceTargets.length === 0) {
   console.error("Missing required environment variables.");
-  console.error("Set DISCORD_TOKEN, GUILD_ID, and VOICE_CHANNEL_ID in .env.");
+  console.error("Set DISCORD_TOKEN and either VOICE_TARGETS or GUILD_ID + VOICE_CHANNEL_ID in .env.");
   process.exit(1);
 }
 
@@ -29,9 +63,9 @@ const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates],
 });
 
-let reconnectTimer = null;
+const reconnectTimers = new Map();
 let healthcheckTimer = null;
-let connectInProgress = false;
+const connectInProgress = new Set();
 let loginInProgress = false;
 
 function delay(ms) {
@@ -44,31 +78,40 @@ function log(message) {
   console.log(`[${new Date().toISOString()}] ${message}`);
 }
 
-function scheduleReconnect(reason) {
-  if (reconnectTimer) {
+function targetKey(target) {
+  return `${target.guildId}:${target.voiceChannelId}`;
+}
+
+function scheduleReconnect(target, reason) {
+  if (reconnectTimers.has(target.guildId)) {
     return;
   }
 
-  log(`Scheduling reconnect in ${reconnectDelayMs}ms. Reason: ${reason}`);
-  reconnectTimer = setTimeout(async () => {
-    reconnectTimer = null;
-    await ensureVoiceConnection("scheduled-reconnect");
+  log(
+    `Scheduling reconnect in ${reconnectDelayMs}ms for guild ${target.guildId}. Reason: ${reason}`,
+  );
+  const timer = setTimeout(async () => {
+    reconnectTimers.delete(target.guildId);
+    await ensureVoiceConnection(target, "scheduled-reconnect");
   }, reconnectDelayMs);
+
+  reconnectTimers.set(target.guildId, timer);
 }
 
-async function ensureVoiceConnection(reason = "healthcheck") {
+async function ensureVoiceConnection(target, reason = "healthcheck") {
   if (!client.isReady()) {
     return;
   }
 
-  if (connectInProgress) {
+  const key = targetKey(target);
+  if (connectInProgress.has(key)) {
     return;
   }
 
-  connectInProgress = true;
+  connectInProgress.add(key);
   try {
-    const guild = await client.guilds.fetch(guildId);
-    const channel = await guild.channels.fetch(voiceChannelId);
+    const guild = await client.guilds.fetch(target.guildId);
+    const channel = await guild.channels.fetch(target.voiceChannelId);
 
     if (!channel) {
       throw new Error("Voice channel not found");
@@ -113,21 +156,21 @@ async function ensureVoiceConnection(reason = "healthcheck") {
         ]);
       } catch {
         connection.destroy();
-        scheduleReconnect("disconnected");
+        scheduleReconnect(target, "disconnected");
       }
     });
 
     connection.on(VoiceConnectionStatus.Destroyed, () => {
-      scheduleReconnect("destroyed");
+      scheduleReconnect(target, "destroyed");
     });
 
     await entersState(connection, VoiceConnectionStatus.Ready, 30000);
-    log("Voice connection is ready.");
+    log(`Voice connection is ready for guild ${target.guildId}.`);
   } catch (error) {
-    log(`Connection attempt failed: ${error.message}`);
-    scheduleReconnect("connect-failed");
+    log(`Connection attempt failed for guild ${target.guildId}: ${error.message}`);
+    scheduleReconnect(target, "connect-failed");
   } finally {
-    connectInProgress = false;
+    connectInProgress.delete(key);
   }
 }
 
@@ -153,10 +196,10 @@ async function startLoginLoop() {
 }
 
 function clearTimers() {
-  if (reconnectTimer) {
-    clearTimeout(reconnectTimer);
-    reconnectTimer = null;
-  }
+  reconnectTimers.forEach((timer) => {
+    clearTimeout(timer);
+  });
+  reconnectTimers.clear();
 
   if (healthcheckTimer) {
     clearInterval(healthcheckTimer);
@@ -167,14 +210,16 @@ function clearTimers() {
 async function shutdown(code = 0) {
   clearTimers();
 
-  try {
-    const connection = getVoiceConnection(guildId);
-    if (connection) {
-      connection.destroy();
+  voiceTargets.forEach((target) => {
+    try {
+      const connection = getVoiceConnection(target.guildId);
+      if (connection) {
+        connection.destroy();
+      }
+    } catch (error) {
+      log(`Shutdown connection cleanup error for guild ${target.guildId}: ${error.message}`);
     }
-  } catch (error) {
-    log(`Shutdown connection cleanup error: ${error.message}`);
-  }
+  });
 
   try {
     await client.destroy();
@@ -188,11 +233,15 @@ async function shutdown(code = 0) {
 client.once("ready", async () => {
   log(`Logged in as ${client.user.tag}`);
 
-  await ensureVoiceConnection("startup");
+  for (const target of voiceTargets) {
+    await ensureVoiceConnection(target, "startup");
+  }
 
   if (!healthcheckTimer) {
     healthcheckTimer = setInterval(async () => {
-      await ensureVoiceConnection("healthcheck");
+      for (const target of voiceTargets) {
+        await ensureVoiceConnection(target, "healthcheck");
+      }
     }, healthcheckIntervalMs);
   }
 });
@@ -203,7 +252,10 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
   }
 
   if (oldState.channelId && !newState.channelId) {
-    scheduleReconnect("bot-was-disconnected-from-voice");
+    const target = voiceTargets.find((item) => item.guildId === oldState.guild.id);
+    if (target) {
+      scheduleReconnect(target, "bot-was-disconnected-from-voice");
+    }
   }
 });
 
@@ -213,11 +265,15 @@ client.on("error", (error) => {
 
 client.on("shardError", (error) => {
   log(`Shard error: ${error.message}`);
-  scheduleReconnect("shard-error");
+  voiceTargets.forEach((target) => {
+    scheduleReconnect(target, "shard-error");
+  });
 });
 
 client.on("shardDisconnect", () => {
-  scheduleReconnect("gateway-disconnect");
+  voiceTargets.forEach((target) => {
+    scheduleReconnect(target, "gateway-disconnect");
+  });
 });
 
 client.on("invalidated", () => {

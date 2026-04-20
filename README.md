@@ -1,6 +1,6 @@
 # 24/7 Discord Voice Bot
 
-This bot joins one voice channel and keeps reconnecting if disconnected.
+This bot joins voice channels and keeps reconnecting if disconnected.
 
 ## 1) Create Discord Bot
 
@@ -17,11 +17,24 @@ This bot joins one voice channel and keeps reconnecting if disconnected.
 Copy `.env.example` to `.env` and fill values:
 
 - `DISCORD_TOKEN`
-- `GUILD_ID`
-- `VOICE_CHANNEL_ID`
+- `VOICE_TARGETS` (recommended for one service across multiple servers)
+- `GUILD_ID` (optional single-server fallback)
+- `VOICE_CHANNEL_ID` (optional single-server fallback)
 - `RECONNECT_DELAY_MS` (optional)
 - `HEALTHCHECK_INTERVAL_MS` (optional)
 - `LOGIN_RETRY_DELAY_MS` (optional)
+
+`VOICE_TARGETS` format:
+
+```text
+GUILD_ID:VOICE_CHANNEL_ID,GUILD_ID:VOICE_CHANNEL_ID
+```
+
+Example for 2 servers in one Railway service:
+
+```text
+VOICE_TARGETS=1485555812754522196:1485555814461739023,123456789012345678:234567890123456789
+```
 
 ## 3) Run Locally
 
@@ -43,48 +56,38 @@ Dev mode with auto-reload:
 npm run dev
 ```
 
-## 4) Deploy on Render
+## 4) Deploy on Railway
 
-Use a Background Worker (not a Web Service), so it stays running.
-
-### Option A: Manual Dashboard Setup
+Use a Worker service so the process runs continuously.
 
 1. Push this repo to GitHub.
-2. In Render, create **New + -> Background Worker**.
-3. Connect the repository.
-4. Configure:
-  - Runtime: Node
-  - Build Command: `npm install`
-  - Start Command: `npm start`
-5. Add environment variables in Render:
+2. In Railway, create a new project and connect the repository.
+3. Set service start command to `npm start`.
+4. Add environment variables in Railway:
   - `DISCORD_TOKEN`
-  - `GUILD_ID`
-  - `VOICE_CHANNEL_ID`
+  - `VOICE_TARGETS` (recommended)
+  - `GUILD_ID` (optional fallback)
+  - `VOICE_CHANNEL_ID` (optional fallback)
   - `RECONNECT_DELAY_MS` (optional, e.g. `15000`)
   - `HEALTHCHECK_INTERVAL_MS` (optional, e.g. `60000`)
   - `LOGIN_RETRY_DELAY_MS` (optional, e.g. `20000`)
-6. Deploy.
-
-### Option B: Blueprint (render.yaml)
-
-This repo includes [render.yaml](render.yaml). In Render, choose **New + -> Blueprint** and point to this repository.
-
-After creation, set secret env vars:
-
-- `DISCORD_TOKEN`
-- `GUILD_ID`
-- `VOICE_CHANNEL_ID`
+5. Deploy.
 
 ## 5) Keep It Truly 24/7
 
-- Use a paid Render worker plan to avoid free-instance sleep behavior.
-- Keep Auto-Deploy enabled.
+- Keep the Railway service always on (no sleep).
+- Enable automatic restarts and auto deploy.
 - Check logs for:
   - `Logged in as ...`
   - `Voice connection is ready.`
+
+## 6) Optional Render Setup
+
+If you return to Render later, use a Background Worker and the same environment variables.
 
 ## Notes
 
 - If host/container restarts, the bot reconnects on startup.
 - If Discord voice disconnects, reconnect logic retries automatically.
 - Ensure the target voice channel allows the bot role to connect.
+- One service can connect to multiple servers using `VOICE_TARGETS`.
